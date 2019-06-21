@@ -1,0 +1,261 @@
+---
+title: "SB_project"
+author: "MariaRomanova"
+output: pdf_document
+---
+# All required packages
+```{r}
+ipak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+
+required_libraries = c('sas7bdat','tidyr','plyr','reshape2','MASS','ggplot2','UpSetR','data.table','Hmisc','foreach','dplyr')
+ipak(required_libraries)
+```
+
+# All datasets needed
+```{r}
+analysis <- data.frame(sas7bdat::read.sas7bdat('Baseline/assay.sas7bdat'))
+oldtnfa <- data.frame(sas7bdat::read.sas7bdat('Baseline/oldtnfa.sas7bdat'))
+analysis <- join(analysis,oldtnfa)
+analysis_2 <- data.frame(sas7bdat::read.sas7bdat('Follow_up1/assay.sas7bdat'))
+analysis_3 <- data.frame(sas7bdat::read.sas7bdat('Follow_up2/assay.sas7bdat'))
+analysis_4 <- data.frame(sas7bdat::read.sas7bdat('Follow_up3/assay.sas7bdat'))
+analysis_5 <- data.frame(sas7bdat::read.sas7bdat('Follow_up4/assay.sas7bdat'))
+diseases <- data.frame(sas7bdat::read.sas7bdat('Baseline/deseases.sas7bdat'))
+interview <- data.frame(sas7bdat::read.sas7bdat('Baseline/interview.sas7bdat'))
+physical <- data.frame(sas7bdat::read.sas7bdat('Baseline/phisical.sas7bdat'))
+under_65 <- subset(analysis,analysis$X_AGEL<65)
+under_65_M <- subset(under_65,under_65$SEX==1) %>% dplyr::select(-SEX)
+under_65_F <- subset(under_65,under_65$SEX==2) %>% dplyr::select(-SEX)
+```
+# # PART 1. Separate study
+# Oxidized guanine, guanosine and deoxyguanosine using Baseline 24-hour urine sample
+X_CASCTL 1=case,0=control X_UGUO24  X_UXGA24 
++ lm
+```{r}
+separate_study <- c('X_CASCTL','X_PPAIR','X_UGUA24','X_UXGA24','X_UGUO24','X_UXGO24','X_UDG24','X_UXDG24','X_UCOR24')
+separate_study_df_M <- subset(analysis,analysis$SEX==1) %>%
+  dplyr::select(separate_study)
+separate_study_df_F <- subset(analysis,analysis$SEX==2) %>% 
+  dplyr::select(separate_study)
+
+lst <- list(separate_study_df_M,separate_study_df_F)
+
+lapply(lst, function(x){
+  df <- x
+  case    <- subset(df, df$X_CASCTL == '1') %>% 
+    dplyr::select(-c('X_CASCTL','X_PPAIR'))
+  control <- subset(df, df$X_CASCTL == '0') %>% 
+    dplyr::select(-c('X_CASCTL','X_PPAIR'))
+  
+    corrplot::corrplot(cor(case,method = 'spearman',
+                         use='pairwise.complete'),
+                     method = c("circle"),
+                     type='upper')
+    corrplot::corrplot(cor(control,method = 'spearman',
+                         use='pairwise.complete'),
+                     method = c("circle"), 
+                     type='upper')
+
+  
+  l <- names(case)
+  lapply(l, function(x){
+  return(list(x,summary(lm(X_UCOR24~case[,x],data=case))))})
+    summary(lm(X_UCOR24~X_UGUA24+X_UXGO24,data=case))
+    summary(lm(X_UCOR24~X_UGUA24+X_UGUO24,data=case))
+})
+```
+
+```{r}
+case    <- subset(separate_study_df_M, separate_study_df_M$X_CASCTL == '1') %>% 
+    dplyr::select(-c('X_CASCTL','X_PPAIR'))
+df <- case
+sample <- sample.int(n=nrow(df),size=floor(.75*nrow(df)))
+train <- df[sample,]
+test <- df[-sample,]
+new_mod <- lm(X_UCOR24~X_UXGO24,data=train)
+summary(new_mod)
+pred <- predict(new_mod,test)
+ggplot(train,aes(x=X_UXGO24,y=X_UCOR24))+
+  geom_point() +
+  geom_smooth(method = 'lm') +
+  geom_point(data=test,col='green') +
+  geom_point(data = new_mod,aes(y=new_mod$fitted.values),color='red') 
+```
+
+# Part 2
+Finding all significant correlations with spearman, creating a list of correlations dataframes over all 5 waves of study
+```{r}
+qplot(analysis$X_AGEL,
+      geom="histogram",
+      binwidth = 1,  
+      main = "Histogram of Age", 
+      xlab = "Age",
+      ylab = "Count",
+      col=I("red"),
+      fill=I("lightblue")) + 
+  scale_x_continuous(breaks=c(20,40,65,80,100)) 
+```
+
+Only people up to 65 were taken
+```{r}
+# List with 5 data frames of significant correlations
+lst <- list(analysis,analysis_2,analysis_3,analysis_4,analysis_5)
+cor <- lapply(lst, function(x){
+  
+  under_65 <- subset(x,x[,6]<65) %>% select_if(is.numeric)
+  
+  under_65_M <- subset(under_65,under_65$SEX==1) %>% dplyr::select(-SEX)
+  
+  under_65_F <- subset(under_65,under_65$SEX==2) %>% dplyr::select(-SEX)
+  
+  flat_cor_mat <- function(cor_r, cor_p){
+    library(tidyr)
+    library(tibble)
+    cor_r <- rownames_to_column(as.data.frame(cor_r), var = "row")
+    cor_r <- gather(cor_r, column, cor, -1)
+    cor_p <- rownames_to_column(as.data.frame(cor_p), var = "row")
+    cor_p <- gather(cor_p, column, p, -1)
+    cor_p_matrix <- left_join(cor_r, cor_p, by = c("row", "column"))
+    cor_p_matrix %>%
+      subset(cor > 0.5 | cor <(-0.5))
+  }
+  
+  under_65_M <- Hmisc::rcorr(as.matrix(under_65_M),type='spearman')
+  under_65_F <- Hmisc::rcorr(as.matrix(under_65_F),type='spearman')
+  
+  cor_matrix_1 <- flat_cor_mat(under_65_M$r, under_65_M$P) %>%
+    subset(cor> 0.5 | cor<(-0.5) & p < 0.05) %>% subset(!duplicated(cor))
+  
+  cor_matrix_2 <- flat_cor_mat(under_65_F$r, under_65_F$P) %>%
+    subset(cor> 0.5 | cor<(-0.5) & p < 0.05) %>% subset(!duplicated(cor))
+  
+  cor_matrix_1$cor_pair <- paste(cor_matrix_1$row,cor_matrix_1$column,sep=',')
+  cor_matrix_2$cor_pair <- paste(cor_matrix_2$row,cor_matrix_2$column,sep=',')
+  
+  return(merge(cor_matrix_1,cor_matrix_2, by='cor_pair',all=T))
+})
+```
+Interesting correlation of total cholesterol and vitamin E
+```{r}
+library(ggpubr)
+ggplot(under_65_F,aes(under_65_F$X_COLTOT,under_65_F$X_ATOCRS)) +
+  geom_point() +
+  geom_smooth(method = 'lm') +
+  stat_cor(method = "spearman",label.x = 50) +
+  theme_light()
+```
+
+```{r}
+df <- under_65_F
+sample <- sample.int(n=nrow(df),size=floor(.75*nrow(df)))
+train <- df[sample,]
+test <- df[-sample,]
+new_mod <- lm(X_COLTOT~X_ATOCRS,data=train)
+summary(new_mod)
+pred <- predict(new_mod,test)
+ggplot(train,aes(x=X_ATOCRS,y=X_COLTOT))+
+  geom_point() +
+  geom_smooth(method = 'lm') +
+  geom_point(data=test,col='green') +
+  geom_point(data = new_mod,aes(y=new_mod$fitted.values),color='red') +
+  annotate("text", x=30, y=400, label= "Adjusted R-squared:  0.5173") +
+  annotate("text", x=30, y=380, label= "lm(formula = X_COLTOT ~ X_ATOCRS") +
+  ggtitle('Linear model:test/train. Total cholesterol and vitamin E')
+```
+
+# Age prediction with linear model
+Males
+```{r}
+library(randtests)
+df <- select(under_65_M,c(X_AGEL,X_TIGF1,X_COLTOT,X_DHEAS,X_BIOATS,X_ATOCRS,X_FREETS,X_TSSHBG))
+corrplot::corrplot(cor(df,use='pairwise.complete'),p.mat=corrplot::cor.mtest(df)$p)
+l <- names(df)
+lapply(l, function(x){
+  return(list(x,summary(lm(X_AGEL~df[,x],data=df))))})
+fit <- lm(X_AGEL~X_TIGF1+X_DHEAS+X_BIOATS,data=df)
+summary(fit)
+runs.test(fit$residuals)
+
+sample <- sample.int(n=nrow(df),size=floor(.75*nrow(df)))
+train <- df[sample,]
+test <- df[-sample,]
+new_mod <- lm(X_AGEL~.,data=train)
+summary(new_mod)
+plot(new_mod)
+library(randtests)
+runs.test(new_mod$residuals)
+```
+Females
+```{r}
+df <- select(under_65_F,c(X_AGEL,X_TIGF1,X_COLTOT,X_DHEAS,X_ESTDIO,X_ATOCRS,X_FREETS,X_TSSHBG))
+corrplot::corrplot(cor(df,use='pairwise.complete'),p.mat=corrplot::cor.mtest(df)$p)
+l <- names(df)
+lapply(l, function(x){
+  return(list(x,summary(lm(X_AGEL~df[,x],data=df))))})
+fit <- lm(X_AGEL~X_TIGF1+X_DHEAS,data=df)
+summary(fit)
+plot(fit)
+runs.test(fit$residuals)
+
+sample <- sample.int(n=nrow(df),size=floor(.75*nrow(df)))
+train <- df[sample,]
+test <- df[-sample,]
+new_mod <- lm(X_AGEL~.,data=train)
+summary(new_mod)
+plot(new_mod)
+library(randtests)
+runs.test(new_mod$residuals)
+```
+
+# Part 3 Association rules
+```{r}
+library(arules)
+physical <- select(physical,c(PX1_V20,PX1_V21,CODE98))
+smoke <- select(interview,c(CODE98,IX9_V37))
+vec1 <- intersect(physical$CODE98,analysis$CODE98) %>%
+  intersect(diseases$CODE98)
+analysis <- analysis[analysis$CODE98 %in% vec1,]
+df <- select(analysis,c(X_U_PH,X_U_PRO, X_COLTOT,X_A_G,X_AGEL,X_GLU,X_TIGF1,X_INSULN,X_IL6,X_A_G,X_TNFA,XBIOATSM,X_ESTDIO,X_TNFAR1,X_LUTEIN,X_FIBRIN,X_TRIGLI,X_UBPA24,X_PALK,X_ATOCRS,X_OM6_A,X_DHEAS,X_MIO,X_COLHDL,X_COLLDL,X_UCRE24,X_UGUA24,X_UCOR24))
+df <- as.data.frame(sapply(names(df), function(x){
+  discretize(df[,x],method = 'cluster')
+  }))
+vec <- c('AXCANCER','AXEPATOC','AXMI','AXCHF','AXSTROKE','AXPARK','AXBPCO','AXANGINA','AXPADI','AXASTHMA','AXMIPERT','AXMWAIST','AXMHTRIG','AXMHGLUC','AXMLOHDL','AXDEMENT','AXVASDEM','AXMETBOL','SEX','CITE')
+ 
+diseases <- diseases[diseases$CODE98 %in% vec1,]
+physical <- mutate(physical,BMI=PX1_V20/((PX1_V21/100)^2))
+
+smoke <- smoke[smoke$CODE98 %in% vec1,]
+df$BMI <- physical$BMI
+diseases_ <- diseases[diseases$CODE98 %in% vec1,names(diseases) %in% vec]
+df$smoke <- smoke$IX9_V37
+df <- cbind(df,diseases_)
+df <- df%>%
+    mutate_if(is.numeric,as.factor)
+tData <- as (df, "transactions")
+rules <- apriori(tData, parameter = list(supp = 0.01, conf = 0.8, target = "rules", maxlen=2))
+inspect(head(rules, by = "lift",n=1000))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
